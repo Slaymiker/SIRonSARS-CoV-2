@@ -1,0 +1,204 @@
+import pandas as pd
+import os
+
+# Функция для чтения txt файла и извлечения данных
+def read_txt_file(txt_file_path):
+    file_data = []
+    with open(txt_file_path, 'r', encoding='utf-8') as file:
+        for line in file:
+            stripped_line = line.strip()
+            if not stripped_line:
+                continue  # Пропускаем пустые строки
+
+            parts = stripped_line.split(' - ', maxsplit=1)
+            if len(parts) != 2:
+                print(f"Ошибка парсинга строки: {stripped_line}")
+                continue
+
+            file_name, population_str = parts
+            try:
+                population = int(population_str.strip('()').replace('_', ''))
+            except ValueError:
+                print(f"Невозможно преобразовать численность населения: {population_str}")
+                continue
+
+            if population > 0:
+                file_data.append((file_name.strip(), population))
+    return file_data
+
+# Функция для определения start_day и end_day
+def determine_start_end_days(data):
+    active_cases = data['Активные случаи'].fillna(0)
+    start_day = None
+    end_day = None
+
+    # Определение start_day
+    for idx, value in enumerate(active_cases):
+        if value != 0:
+            start_day = idx + 1  # Номер строки начинается с 1
+            break
+
+    if start_day is None:
+        return None, None  # Если нет активных случаев, пропускаем файл
+
+    # Определение end_day
+    for idx in range(start_day, len(active_cases)):
+        if active_cases[idx] == 0:
+            end_day = idx  # Последний день с нулевым значением
+            break
+        elif idx > 0 and abs(active_cases[idx] - active_cases[idx - 1]) / active_cases[idx - 1] > 0.2:
+            end_day = idx  # День с резким скачком или падением
+            break
+
+    # Убедимся, что end_day > start_day + 50
+    if end_day is not None and end_day <= start_day + 50:
+        end_day = start_day + 50  # Устанавливаем минимальное значение
+
+    return start_day, end_day
+
+# Главная функция для обработки всех файлов
+def process_files(txt_file_path, input_folder, output_folder):
+    # Чтение данных из txt файла
+    file_data = read_txt_file(txt_file_path)
+
+    # Создание папки для выходных файлов
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Обработка каждого файла
+    for file_name, population in file_data:
+        file_path = os.path.join(input_folder, f'{file_name}.xlsx')
+        if not os.path.exists(file_path):
+            print(f"Файл {file_name}.xlsx не найден. Пропускаем.")
+            continue
+
+        # Чтение данных из Excel
+        data = pd.read_excel(file_path)
+        data['Активные случаи'] = data['Активные случаи'].fillna(0)
+
+        # Определение start_day и end_day
+        start_day, end_day = determine_start_end_days(data)
+        if start_day is None or end_day is None:
+            print(f"Невозможно определить start_day/end_day для файла {file_name}. Пропускаем.")
+            continue
+
+        # Настройка параметров модели
+        S0 = population
+
+        # Вычисление предсказаний
+        predicted_data = calculate_and_predict(data, start_day, end_day, window_size=20)
+
+        # Сохранение выходной таблицы
+        output_file_name = f"{file_name}_{start_day}_{end_day}.xlsx"
+        output_file_path = os.path.join(output_folder, output_file_name)
+        predicted_data.to_excel(output_file_path, index=False)
+        print(f"Сохранён файл: {output_file_path}")
+
+# Функция для вычисления предсказаний по окнам
+def calculate_and_predict(data, start_day, end_day, window_size=20):
+    data = data.iloc[start_day - 1:end_day]  # Выбираем данные в указанном диапазоне
+    num_windows = len(data) // window_size - 1  # Количество окон
+    # Создание новой таблицы с предсказаниями
+    predicted_data = data.copy()
+    columns_to_add = [
+        'SIR Прогноз S', 'SIR Прогноз I', 'SIR Прогноз R',
+        'SIR Процентное отклонение S', 'SIR Процентное отклонение I', 'SIR Процентное отклонение R',
+        'SEIR Прогноз S', 'SEIR Прогноз I', 'SEIR Прогноз R',
+        'SEIR Процентное отклонение S', 'SEIR Процентное отклонение I', 'SEIR Процентное отклонение R',
+        'SIRS Прогноз S', 'SIRS Прогноз I', 'SIRS Прогноз R',
+        'SIRS Процентное отклонение S', 'SIRS Процентное отклонение I', 'SIRS Процентное отклонение R',
+        'SIQR Прогноз S', 'SIQR Прогноз I', 'SIQR Прогноз R',
+        'SIQR Процентное отклонение S', 'SIQR Процентное отклонение I', 'SIQR Процентное отклонение R'
+    ]
+    for col in columns_to_add:
+        predicted_data[col] = np.nan
+    for i in range(num_windows):
+        # Определение границ окон
+        train_start = i * window_size
+        train_end = train_start + window_size
+        test_start = train_end
+        test_end = test_start + window_size
+        # Обучающая и тестовая выборки
+        train_data_window = data.iloc[train_start:train_end]
+        test_data_window = data.iloc[test_start:test_end]
+        # Дни для обучающей и тестовой выборок
+        train_days_range = range(start_day + train_start, start_day + train_end)
+        test_days_range = range(start_day + test_start, start_day + test_end)
+        # Подгонка параметров для каждой модели
+        models = {
+            "SIR": (sir_model, error_function_sir, [0.02, 0.02], ['SIR Прогноз S', 'SIR Прогноз I', 'SIR Прогноз R']),
+            "SEIR": (seir_model, error_function_seir, [0.02, 0.02, 0.1], ['SEIR Прогноз S', 'SEIR Прогноз I', 'SEIR Прогноз R']),
+            "SIRS": (sirs_model, error_function_sirs, [0.02, 0.02, 0.01], ['SIRS Прогноз S', 'SIRS Прогноз I', 'SIRS Прогноз R']),
+            "SIQR": (siqr_model, error_function_siqr, [0.02, 0.02, 0.01, 0.01], ['SIQR Прогноз S', 'SIQR Прогноз I', 'SIQR Прогноз R'])
+        }
+        for model_name, (model, error_func, initial_guess, prediction_cols) in models.items():
+            result = minimize(
+                error_func,
+                initial_guess,
+                args=(train_data_window, S0),
+                method='L-BFGS-B',
+                bounds=[(0, 1)] * len(initial_guess)
+            )
+            optimized_params = result.x
+            # Прогнозирование на тестовом окне
+            initial_conditions = [
+                train_data_window['S'].iloc[-1],
+                train_data_window['Активные случаи'].iloc[-1],
+                train_data_window['R'].iloc[-1]
+            ]
+            if model_name == "SEIR":
+                initial_conditions.insert(1, 0)  # Добавляем E0 = 0
+            elif model_name == "SIQR":
+                initial_conditions.insert(2, 0)  # Добавляем Q0 = 0
+            solution_test = odeint(
+                model,
+                initial_conditions,
+                test_days_range,
+                args=(S0, *optimized_params)
+            )
+            # Запись предсказаний в новую таблицу
+            if model_name == "SEIR":
+                S_pred, _, I_pred, R_pred = solution_test.T
+            elif model_name == "SIQR":
+                S_pred, I_pred, _, R_pred = solution_test.T
+            else:
+                S_pred, I_pred, R_pred = solution_test.T
+            predicted_data.loc[test_data_window.index, prediction_cols[0]] = S_pred
+            predicted_data.loc[test_data_window.index, prediction_cols[1]] = I_pred
+            predicted_data.loc[test_data_window.index, prediction_cols[2]] = R_pred
+            # Расчёт процентного отклонения
+            predicted_data.loc[test_data_window.index, f'{model_name} Процентное отклонение S'] = (
+                np.abs(S_pred - test_data_window['S']) / test_data_window['S'] * 100
+            )
+            predicted_data.loc[test_data_window.index, f'{model_name} Процентное отклонение I'] = (
+                np.abs(I_pred - test_data_window['Активные случаи']) / test_data_window['Активные случаи'] * 100
+            )
+            predicted_data.loc[test_data_window.index, f'{model_name} Процентное отклонение R'] = (
+                np.abs(R_pred - test_data_window['R']) / test_data_window['R'] * 100
+            )
+            print(f"Окно {i + 1}, Модель {model_name}: оптимизированные параметры = {optimized_params}")
+    # Переименование столбцов
+    predicted_data = predicted_data.rename(columns={
+        'S': 'Фактическая выборка (S)',
+        'Активные случаи': 'Фактические инфец. (I)',
+        'R': 'Фактические выздор/умер (R)'
+    })
+    # Список финальных столбцов с новыми названиями
+    final_columns = [
+        'Дата',
+        'Фактическая выборка (S)', 'Фактические инфец. (I)', 'Фактические выздор/умер (R)',
+        *columns_to_add
+    ]
+    # Убедитесь, что столбец 'Дата' существует
+    if 'Дата' not in predicted_data.columns:
+        predicted_data['Дата'] = pd.date_range(start='2020-01-01', periods=len(predicted_data))
+    # Формирование финальной таблицы
+    predicted_data = predicted_data[final_columns]
+    return predicted_data
+
+# Путь к txt файлу, папке с исходными файлами и папке для выходных файлов
+txt_file_path = 'Население_По_Регионам.txt'  # Путь к текстовому файлу с данными
+input_folder = 'Регионы_3'  # Папка с исходными Excel файлами
+output_folder = 'Выходные данные'  # Папка для сохранения результатов
+
+# Запуск обработки файлов
+process_files(txt_file_path, input_folder, output_folder)
