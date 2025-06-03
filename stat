@@ -1,0 +1,93 @@
+import pandas as pd
+import os
+
+# Путь к папке с файлами
+input_folder = 'stat'
+output_file = 'itog_stat_reg.xlsx'
+
+# Получаем список всех файлов в папке stat
+files = [f for f in os.listdir(input_folder) if f.endswith('.xlsx')]
+
+# Проходим по каждому файлу
+for file_name in files:
+    base_name = os.path.splitext(file_name)[0]  # Убираем расширение .xlsx
+    file_path = os.path.join(input_folder, file_name)  # Полный путь к файлу
+    
+    # Чтение данных из Excel-файла
+    df = pd.read_excel(file_path)
+
+    # Список моделей
+    models = ['SEIR', 'SIRS', 'SIS', 'SIQR', 'SIR']
+
+    # Словарь для хранения средних отклонений
+    mean_deviations = {}
+
+    # Проходим по каждой модели
+    for model in models:
+        # Словарь для хранения отклонений по каждому параметру для текущей модели
+        param_deviations = {}
+        
+        for param in ['В', 'И', 'В/У']:
+            actual_col = f'Ф {param}'
+            model_col = f'{param} {model}'
+            
+            # Проверяем, что столбцы существуют в DataFrame
+            if actual_col in df.columns and model_col in df.columns:
+                # Вычисляем процентное отклонение
+                deviation = abs((df[model_col] - df[actual_col]) / df[actual_col]) * 100
+                
+                # Вычисляем среднее отклонение для текущего параметра
+                mean_deviation = deviation.mean()
+                param_deviations[param] = mean_deviation
+        
+        # Вычисляем общее среднее отклонение для модели
+        overall_mean = sum(param_deviations.values()) / len(param_deviations) if param_deviations else None
+        param_deviations['Среднее'] = overall_mean
+        
+        # Сохраняем отклонения для текущей модели
+        mean_deviations[model] = param_deviations
+
+    # Подготовка данных для записи в itog_stat.xlsx
+    new_row = {'Имя файла': base_name}
+
+    for model in models:
+        for param in ['В', 'И', 'В/У']:
+            column_name = f'% {param} {model}'
+            new_row[column_name] = mean_deviations[model].get(param, None)
+        
+        # Добавляем общее среднее для модели
+        new_row[f'Среднее {model}'] = mean_deviations[model].get('Среднее', None)
+
+    # Запись данных в файл
+    try:
+        # Если файл существует, загружаем его
+        existing_df = pd.read_excel(output_file)
+        
+        # Проверяем, есть ли запись с таким же именем файла
+        if 'Имя файла' in existing_df.columns and base_name in existing_df['Имя файла'].values:
+            # Находим индекс строки с совпадающим именем файла
+            index_to_update = existing_df[existing_df['Имя файла'] == base_name].index[0]
+            
+            # Обновляем данные в этой строке
+            for key, value in new_row.items():
+                existing_df.at[index_to_update, key] = value
+            
+            # Записываем обновленные данные обратно в файл
+            with pd.ExcelWriter(output_file, engine='openpyxl', mode='w') as writer:
+                existing_df.to_excel(writer, index=False)
+            
+            print(f"Запись для файла '{base_name}' успешно обновлена.")
+        else:
+            # Если записи нет, добавляем новую строку
+            updated_df = pd.concat([existing_df, pd.DataFrame([new_row])], ignore_index=True)
+            
+            # Записываем обновленные данные
+            with pd.ExcelWriter(output_file, engine='openpyxl', mode='w') as writer:
+                updated_df.to_excel(writer, index=False)
+            
+            print(f"Новая запись для файла '{base_name}' успешно добавлена.")
+    except FileNotFoundError:
+        # Если файл не существует, создаем новый
+        new_df = pd.DataFrame([new_row])
+        new_df.to_excel(output_file, index=False)
+        print(f"Файл '{output_file}' создан, запись для файла '{base_name}' успешно добавлена.")
