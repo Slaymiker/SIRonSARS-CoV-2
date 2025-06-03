@@ -1,0 +1,121 @@
+import os
+import pandas as pd
+
+# Функция для очистки строки от недопустимых символов в именах файлов
+def sanitize_filename(name):
+    # Заменяем недопустимые символы на подчеркивание "_"
+    invalid_chars = r'<>:"/\|?*'
+    for char in invalid_chars:
+        name = name.replace(char, '_')
+    return name
+
+# Функция для получения уникальных регионов
+def get_unique_regions(folder_path):
+    regions = set()
+
+    for file_name in os.listdir(folder_path):
+        if file_name.endswith(".txt"):
+            file_path = os.path.join(folder_path, file_name)
+            df = pd.read_csv(file_path)
+            
+            # Добавляем уникальные значения регионов
+            regions.update(df['Province_State'].dropna().unique())
+    
+    # Преобразуем множество в список и сортируем его
+    return sorted(regions)
+
+# Функция для фильтрации данных по региону
+def filter_data_by_region(folder_path, region):
+    filtered_data = []
+
+    for file_name in sorted(os.listdir(folder_path)):
+        if file_name.endswith(".txt"):
+            file_path = os.path.join(folder_path, file_name)
+            df = pd.read_csv(file_path)
+            
+            # Добавляем столбец "Дата" из названия файла
+            date = file_name.split('.')[0]  # Извлекаем дату из имени файла (ГГГГ-ММ-ДД)
+            df['Date'] = date
+            
+            # Удаляем ненужные столбцы
+            columns_to_drop = ['Incidence_Rate', 'Case-Fatality_Ratio', 'Incident_Rate', 'Case_Fatality_Ratio']
+            df.drop(columns=[col for col in columns_to_drop if col in df.columns], inplace=True)
+            
+            # Фильтруем данные по региону
+            filtered_df = df[df['Province_State'] == region]
+            if not filtered_df.empty:
+                # Группируем данные по дате и суммируем числовые столбцы
+                numeric_columns = ['Confirmed', 'Deaths', 'Recovered', 'Active']
+                grouped_df = filtered_df.groupby('Date', as_index=False)[numeric_columns].sum()
+                
+                # Добавляем остальные столбцы (если необходимо, можно добавить дополнительные поля)
+                grouped_df['Province_State'] = region
+                grouped_df['Country_Region'] = filtered_df['Country_Region'].iloc[0]  # Берем страну из первого элемента
+                grouped_df['Last_Update'] = filtered_df['Last_Update'].iloc[0]  # Берем последнее обновление из первого элемента
+                
+                filtered_data.append(grouped_df)
+
+    return pd.concat(filtered_data, ignore_index=True) if filtered_data else None
+
+# Основная функция программы
+def main():
+    # Путь к исходным файлам и путь для сохранения таблицы
+    input_folder = r"дневные репорты\T2"
+    output_folder = r"Регионы_3"
+
+    # Создаем выходную папку, если она не существует
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Получаем уникальные регионы
+    regions = get_unique_regions(input_folder)
+
+    # Создаем таблицу для каждого региона
+    for region in regions:
+        print(f"Обработка данных для региона: {region}")
+        
+        # Очищаем имя региона от недопустимых символов
+        sanitized_region = sanitize_filename(region)
+        
+        # Формируем имя файла для сохранения
+        output_file = os.path.join(output_folder, f"{sanitized_region}.xlsx")
+
+        # Проверяем, существует ли файл
+        if os.path.exists(output_file):
+            print(f"Файл для региона {region} уже существует. Пропускаем.")
+            continue
+        
+        # Фильтруем данные по региону
+        filtered_data = filter_data_by_region(input_folder, region)
+
+        if filtered_data is not None and not filtered_data.empty:
+            # Переименовываем столбцы на русский язык
+            column_mapping = {
+                'FIPS': 'Код FIPS',
+                'Admin2': 'Административный район',
+                'Province_State': 'Регион/Штат',
+                'Country_Region': 'Страна',
+                'Last_Update': 'Последнее обновление',
+                'Lat': 'Широта',
+                'Long_': 'Долгота',
+                'Confirmed': 'Подтвержденные случаи',
+                'Deaths': 'Смертельные случаи',
+                'Recovered': 'Выздоровевшие',
+                'Active': 'Активные случаи',
+                'Combined_Key': 'Комбинированный ключ',
+                'Date': 'Дата',
+            }
+            filtered_data.rename(columns=column_mapping, inplace=True)
+
+            # Перемещаем столбец "Дата" в начало
+            cols = filtered_data.columns.tolist()
+            cols.insert(0, cols.pop(cols.index('Дата')))
+            filtered_data = filtered_data[cols]
+
+            # Сохраняем данные в Excel
+            filtered_data.to_excel(output_file, index=False)
+            print(f"Таблица успешно сохранена в файл: {output_file}")
+        else:
+            print(f"Данные для региона {region} не найдены.")
+
+if __name__ == "__main__":
+    main()
